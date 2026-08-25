@@ -9,9 +9,8 @@ on:
 jobs:
   convert:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -22,83 +21,90 @@ jobs:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install pymupdf Pillow
+        run: pip install pymupdf
 
-      - name: Convert PDF to Images (Short Name + 200 Split)
+      - name: Convert PDF to Images - 1 to 200 per zip
         shell: python
         run: |
-          import fitz
-          import zipfile
+          import fitz, zipfile
           from pathlib import Path
           import math
 
           pdf_dir = Path("pdf")
-          output_base = Path("images")
-          output_base.mkdir(exist_ok=True, parents=True)
+          out_base = Path("images")
+          out_base.mkdir(parents=True, exist_ok=True)
 
-          pdf_files = list(pdf_dir.glob("*.pdf"))
-          if not pdf_files:
-              print("No PDF found")
-              exit(0)
+          BATCH = 200  # 1-200 ek zip
 
-          BATCH_SIZE = 200
-
-          for pdf_file in pdf_files:
+          for pdf_file in pdf_dir.glob("*.pdf"):
               doc = fitz.open(pdf_file)
-              pdf_name = pdf_file.stem # pdf1
-              total_pages = len(doc)
-              total_parts = math.ceil(total_pages / BATCH_SIZE)
+              pdf_name = pdf_file.stem
+              total = len(doc)
+              parts = math.ceil(total / BATCH)
 
-              print(f"Processing {pdf_name}: {total_pages} pages, {total_parts} parts")
+              print(f"{pdf_name}: {total} pages -> {parts} zip")
 
-              for part in range(total_parts):
-                  start_idx = part * BATCH_SIZE
-                  end_idx = min(start_idx + BATCH_SIZE, total_pages)
+              for p in range(parts):
+                  start = p * BATCH
+                  end = min(start + BATCH, total)
 
-                  # Short folder: images/pdf1/p1
-                  out_dir = output_base / pdf_name / f"p{part+1}"
-                  out_dir.mkdir(parents=True, exist_ok=True)
+                  # temp image folder
+                  tmp_dir = out_base / f"tmp_{pdf_name}_p{p+1}"
+                  tmp_dir.mkdir(parents=True, exist_ok=True)
 
-                  for i in range(start_idx, end_idx):
-                      page = doc[i]
-                      pix = page.get_pixmap(dpi=300, alpha=False)
+                  for i in range(start, end):
+                      pix = doc[i].get_pixmap(dpi=300, alpha=False)
+                      # short name: 0001.jpg
+                      pix.save(str(tmp_dir / f"{i+1:04d}.jpg"), jpg_quality=95)
 
-                      # SHORT NAME: 0001.jpg, 0002.jpg...
-                      # 01.jpg chaile {i+1:02d} use koro
-                      img_name = f"{i+1:04d}.jpg"
-                      img_path = out_dir / img_name
-
-                      # JPG te save korle size 80% kombe
-                      pix.save(str(img_path), jpg_quality=95)
-
-                  # SHORT ZIP NAME: pdf1.zip, pdf1_p2.zip, pdf1_p3.zip
-                  if total_parts == 1:
+                  # zip name: pdf1.zip = 1-200, pdf1_p2.zip = 201-400
+                  if parts == 1:
                       zip_name = f"{pdf_name}.zip"
                   else:
-                      zip_name = f"{pdf_name}_p{part+1}.zip"
+                      zip_name = f"{pdf_name}_p{p+1}.zip" if p > 0 else f"{pdf_name}.zip"
 
-                  zip_path = output_base / zip_name
-                  with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                      for img_file in out_dir.rglob("*.jpg"):
-                          # zip er vitore sudhu 0001.jpg thakbe
-                          zipf.write(img_file, img_file.name)
+                  zip_path = out_base / zip_name
+                  with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
+                      for img in sorted(tmp_dir.glob("*.jpg")):
+                          z.write(img, img.name)
 
-                  print(f"Created {zip_path} -> pages {start_idx+1}-{end_idx}")
+                  # temp folder delete kore dao
+                  for f in tmp_dir.glob("*"): f.unlink()
+                  tmp_dir.rmdir()
+
+                  print(f" -> Created {zip_name} [ {start+1} to {end} ]")
 
               doc.close()
 
-      - name: Upload Zip as Artifact
+      - name: Create matrix
+        id: set-matrix
+        run: |
+          cd images
+          MATRIX=$(ls *.zip | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+
+      - name: Temp upload
         uses: actions/upload-artifact@v4
         with:
-          name: short-name-zips
+          name: temp-zips
           path: images/*.zip
-          retention-days: 7
 
-      - name: Commit images back to repo
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add images/
-          git diff --staged --quiet || git commit -m "Auto: short name 200 split jpg"
-          git push
-        continue-on-error: true
+  # PROTITA ZIP ALADA ARTIFACT HOBE
+  upload-separate:
+    needs: convert
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        zipfile: ${{ fromJson(needs.convert.outputs.matrix) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: temp-zips
+          path: zips
+
+      - name: Upload ${{ matrix.zipfile }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.zipfile }}
+          path: zips/${{ matrix.zipfile }}
+          retention-days: 7
