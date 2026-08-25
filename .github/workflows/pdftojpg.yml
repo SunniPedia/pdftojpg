@@ -9,7 +9,9 @@ on:
 jobs:
   convert:
     runs-on: ubuntu-latest
-    
+    permissions:
+      contents: write
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -20,61 +22,83 @@ jobs:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: |
-          pip install PyMuPDF Pillow
+        run: pip install pymupdf Pillow
 
-      - name: Convert PDF to Images (300 DPI - No Box Issue)
+      - name: Convert PDF to Images (Short Name + 200 Split)
+        shell: python
         run: |
           import fitz
-          import os
           import zipfile
           from pathlib import Path
+          import math
 
           pdf_dir = Path("pdf")
           output_base = Path("images")
-          output_base.mkdir(exist_ok=True)
+          output_base.mkdir(exist_ok=True, parents=True)
 
-          # pdf folder e thaka sob pdf
-          for pdf_file in pdf_dir.glob("*.pdf"):
-              print(f"Processing: {pdf_file}")
+          pdf_files = list(pdf_dir.glob("*.pdf"))
+          if not pdf_files:
+              print("No PDF found")
+              exit(0)
+
+          BATCH_SIZE = 200
+
+          for pdf_file in pdf_files:
               doc = fitz.open(pdf_file)
-              pdf_name = pdf_file.stem
-              out_dir = output_base / pdf_name
-              out_dir.mkdir(exist_ok=True)
-              
-              for i, page in enumerate(doc):
-                  # 300 DPI te render - box asbe na, font thik thakbe
-                  pix = page.get_pixmap(dpi=300)
-                  pix.save(str(out_dir / f"{pdf_name}_page-{i+1:04d}.png"))
-              
-              # Zip create
-              zip_path = output_base / f"{pdf_name}_images.zip"
-              with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                  for img_file in out_dir.rglob("*.png"):
-                      zipf.write(img_file, img_file.relative_to(output_base))
-              
-              print(f"Created: {zip_path}")
+              pdf_name = pdf_file.stem # pdf1
+              total_pages = len(doc)
+              total_parts = math.ceil(total_pages / BATCH_SIZE)
 
-          # Sob image ek sathe ekta full zip
-          with zipfile.ZipFile("images/all_images.zip", 'w', zipfile.ZIP_DEFLATED) as zipf:
-              for file in output_base.rglob("*.png"):
-                  zipf.write(file, file.relative_to(output_base))
-        shell: python
+              print(f"Processing {pdf_name}: {total_pages} pages, {total_parts} parts")
+
+              for part in range(total_parts):
+                  start_idx = part * BATCH_SIZE
+                  end_idx = min(start_idx + BATCH_SIZE, total_pages)
+
+                  # Short folder: images/pdf1/p1
+                  out_dir = output_base / pdf_name / f"p{part+1}"
+                  out_dir.mkdir(parents=True, exist_ok=True)
+
+                  for i in range(start_idx, end_idx):
+                      page = doc[i]
+                      pix = page.get_pixmap(dpi=300, alpha=False)
+
+                      # SHORT NAME: 0001.jpg, 0002.jpg...
+                      # 01.jpg chaile {i+1:02d} use koro
+                      img_name = f"{i+1:04d}.jpg"
+                      img_path = out_dir / img_name
+
+                      # JPG te save korle size 80% kombe
+                      pix.save(str(img_path), jpg_quality=95)
+
+                  # SHORT ZIP NAME: pdf1.zip, pdf1_p2.zip, pdf1_p3.zip
+                  if total_parts == 1:
+                      zip_name = f"{pdf_name}.zip"
+                  else:
+                      zip_name = f"{pdf_name}_p{part+1}.zip"
+
+                  zip_path = output_base / zip_name
+                  with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                      for img_file in out_dir.rglob("*.jpg"):
+                          # zip er vitore sudhu 0001.jpg thakbe
+                          zipf.write(img_file, img_file.name)
+
+                  print(f"Created {zip_path} -> pages {start_idx+1}-{end_idx}")
+
+              doc.close()
 
       - name: Upload Zip as Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: converted-images-zip
-          path: |
-            images/*.zip
-            images/**/*.zip
+          name: short-name-zips
+          path: images/*.zip
           retention-days: 7
 
-      - name: Commit images back to repo (optional)
+      - name: Commit images back to repo
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add images/
-          git diff --staged --quiet || git commit -m "Auto: PDF to Image converted [300 DPI]"
+          git diff --staged --quiet || git commit -m "Auto: short name 200 split jpg"
           git push
         continue-on-error: true
