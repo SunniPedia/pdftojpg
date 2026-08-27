@@ -1,0 +1,89 @@
+name: PDF to Image Push
+
+on:
+  push:
+    paths:
+      - 'pdf/*.pdf'
+  workflow_dispatch:
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - run: pip install pymupdf
+
+      - name: Convert to img folder
+        shell: python
+        run: |
+          import fitz
+          from pathlib import Path
+
+          pdf_dir = Path("pdf")
+          out_base = Path("img")
+          out_base.mkdir(exist_ok=True)
+
+          START_PAGE = 535
+          END_PAGE = 550
+
+          for pdf_file in pdf_dir.glob("*.pdf"):
+              doc = fitz.open(pdf_file)
+              total_pages = len(doc)
+              print(f"{pdf_file.name}: {total_pages} pages | Converting {START_PAGE} to {END_PAGE}")
+
+              if total_pages < START_PAGE:
+                  print(f"Skipping {pdf_file.name}, less than {START_PAGE} pages")
+                  doc.close()
+                  continue
+
+              # actual end can't exceed total pages
+              actual_end = min(END_PAGE, total_pages)
+
+              for i in range(START_PAGE - 1, actual_end):
+                  page_number = i + 1
+                  out = out_base / f"{page_number:04d}.jpg"
+
+                  if out.exists():
+                      print(f"Skipping {out.name} - already exists")
+                      continue
+
+                  print(f"Converting page {page_number} -> {out.name}")
+                  pix = doc[i].get_pixmap(dpi=300, alpha=False)
+                  pix.save(str(out), jpg_quality=95)
+
+              doc.close()
+              print(f"Done: {START_PAGE} to {actual_end} converted")
+
+      - name: Push 20 images at a time
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if [ -z "$(git status --porcelain img/)" ]; then
+            echo "No new images"
+            exit 0
+          fi
+
+          mapfile -t FILES < <(git status --porcelain img/ | awk '{print $2}' | sort -V)
+          TOTAL=${#FILES[@]}
+          BATCH=20
+          echo "Total to push: $TOTAL"
+
+          for (( i=0; i<TOTAL; i+=BATCH )); do
+            for (( j=i; j<i+BATCH && j<TOTAL; j++ )); do
+              git add "${FILES[j]}"
+            done
+            git commit -m "Add img batch $((i/BATCH+1)) pages 535-550 [skip ci]"
+            git push
+            sleep 1
+          done
