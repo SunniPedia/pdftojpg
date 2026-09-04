@@ -1,0 +1,132 @@
+name: PDF to Image
+
+on:
+  push:
+    paths:
+      - 'pdf/*.pdf'
+  workflow_dispatch:
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install pymupdf pillow
+
+      - name: Convert PDF to Images - 1 to 200 per zip
+        shell: python
+        run: |
+          import pymupdf
+          import zipfile
+          from pathlib import Path
+          import math
+          import io
+          from PIL import Image
+
+          pdf_dir = Path("pdf")
+          out_base = Path("images")
+          out_base.mkdir(parents=True, exist_ok=True)
+
+          BATCH = 200
+          MAX_SIZE_BYTES = 1 * 1024 * 1024  # 1 MB Target
+
+          def save_compressed(pix, out_path):
+              # pymupdf pixmap -> PIL Image
+              img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+              
+              quality = 85
+              while True:
+                  buffer = io.BytesIO()
+                  img.save(buffer, format="JPEG", quality=quality, optimize=True)
+                  size = buffer.tell()
+
+                  if size <= MAX_SIZE_BYTES or quality <= 35:
+                      with open(out_path, "wb") as f:
+                          f.write(buffer.getvalue())
+                      break
+                  
+                  quality -= 10
+                  # quality komiyeo na hole image resize kore dao
+                  if quality < 50 and size > MAX_SIZE_BYTES * 1.5:
+                      w, h = img.size
+                      img = img.resize((int(w * 0.85), int(h * 0.85)), Image.LANCZOS)
+                      quality = 85
+
+          for pdf_file in pdf_dir.glob("*.pdf"):
+              doc = pymupdf.open(pdf_file)
+              pdf_name = pdf_file.stem
+              total = len(doc)
+              parts = math.ceil(total / BATCH)
+
+              print(f"{pdf_name}: {total} pages -> {parts} zip")
+
+              for p in range(parts):
+                  start = p * BATCH
+                  end = min(start + BATCH, total)
+
+                  tmp_dir = out_base / f"tmp_{pdf_name}_p{p+1}"
+                  tmp_dir.mkdir(parents=True, exist_ok=True)
+
+                  for i in range(start, end):
+                      pix = doc[i].get_pixmap(dpi=300, alpha=False)
+                      out_img_path = tmp_dir / f"{i+1:04d}.jpg"
+                      save_compressed(pix, out_img_path)
+
+                  if parts == 1:
+                      zip_name = f"{pdf_name}.zip"
+                  else:
+                      zip_name = f"{pdf_name}_p{p+1}.zip" if p > 0 else f"{pdf_name}.zip"
+
+                  zip_path = out_base / zip_name
+                  with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
+                      for img in sorted(tmp_dir.glob("*.jpg")):
+                          z.write(img, img.name)
+
+                  for f in tmp_dir.glob("*"): f.unlink()
+                  tmp_dir.rmdir()
+
+                  print(f" -> Created {zip_name} [ {start+1} to {end} ]")
+
+              doc.close()
+
+      - name: Create matrix
+        id: set-matrix
+        run: |
+          cd images
+          MATRIX=$(ls *.zip | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+
+      - name: Temp upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: temp-zips
+          path: images/*.zip
+
+  upload-separate:
+    needs: convert
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        zipfile: ${{ fromJson(needs.convert.outputs.matrix) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: temp-zips
+          path: zips
+
+      - name: Upload ${{ matrix.zipfile }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.zipfile }}
+          path: zips/${{ matrix.zipfile }}
+          retention-days: 7
