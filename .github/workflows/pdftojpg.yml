@@ -1,9 +1,6 @@
 name: PDF to Image and Zip
 
 on:
-  push:
-    paths:
-      - 'pdf/*.pdf'
   workflow_dispatch:
 
 jobs:
@@ -18,15 +15,16 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install pymupdf
+        run: pip install --upgrade pymupdf
 
-      - name: Convert PDF to Images - 1 to 200 per zip
+      - name: Convert PDF to Images - 1 to 200 per zip (max 500KB per image)
         shell: python
         run: |
-          import fitz, zipfile
+          import pymupdf
+          import zipfile
           from pathlib import Path
           import math
 
@@ -35,9 +33,10 @@ jobs:
           out_base.mkdir(parents=True, exist_ok=True)
 
           BATCH = 200  # 1-200 ek zip
+          MAX_SIZE_BYTES = 500 * 1024  # 500KB
 
           for pdf_file in pdf_dir.glob("*.pdf"):
-              doc = fitz.open(pdf_file)
+              doc = pymupdf.open(pdf_file)
               pdf_name = pdf_file.stem
               total = len(doc)
               parts = math.ceil(total / BATCH)
@@ -48,14 +47,34 @@ jobs:
                   start = p * BATCH
                   end = min(start + BATCH, total)
 
-                  # temp image folder
                   tmp_dir = out_base / f"tmp_{pdf_name}_p{p+1}"
                   tmp_dir.mkdir(parents=True, exist_ok=True)
 
                   for i in range(start, end):
-                      pix = doc[i].get_pixmap(dpi=300, alpha=False)
-                      # short name: 0001.jpg
-                      pix.save(str(tmp_dir / f"{i+1:04d}.jpg"), jpg_quality=95)
+                      dpi = 300
+                      quality = 95
+                      output_path = tmp_dir / f"{i+1:04d}.jpg"
+                      page = doc.load_page(i)
+
+                      while True:
+                          pix = page.get_pixmap(dpi=dpi, alpha=False)
+                          img_bytes = pix.tobytes("jpg", jpg_quality=quality)
+
+                          if len(img_bytes) <= MAX_SIZE_BYTES:
+                              output_path.write_bytes(img_bytes)
+                              print(f"  Page {i+1}: {len(img_bytes)/1024:.1f}KB [dpi={dpi}, q={quality}]")
+                              break
+                          
+                          if quality > 35:
+                              quality -= 5
+                          elif dpi > 150:
+                              dpi -= 25
+                              quality = 85
+                          else:
+                              # 150 dpi + 30 quality teo boro hole ja ache tai save
+                              output_path.write_bytes(img_bytes)
+                              print(f"  Page {i+1}: WARN {len(img_bytes)/1024:.1f}KB >500KB, saved at min")
+                              break
 
                   # zip name: pdf1.zip = 1-200, pdf1_p2.zip = 201-400
                   if parts == 1:
@@ -68,7 +87,7 @@ jobs:
                       for img in sorted(tmp_dir.glob("*.jpg")):
                           z.write(img, img.name)
 
-                  # temp folder delete kore dao
+                  # temp folder delete
                   for f in tmp_dir.glob("*"): f.unlink()
                   tmp_dir.rmdir()
 
