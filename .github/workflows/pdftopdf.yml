@@ -18,7 +18,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install --upgrade pymupdf
+        run: pip install --upgrade pymupdf pillow
 
       - name: Convert PDF -> Split Images -> OCR PDF (50 pages per PDF)
         shell: python
@@ -32,6 +32,7 @@ jobs:
           pdf_dir = Path("pdf")
           out_base = Path("final_pdfs")
           temp_img_base = Path("temp_all_images")
+
           out_base.mkdir(parents=True, exist_ok=True)
           temp_img_base.mkdir(parents=True, exist_ok=True)
 
@@ -62,19 +63,17 @@ jobs:
               pdf_name = pdf_file.stem
               total_orig = len(doc)
               total_images = total_orig * 2 if ENABLE_SPLIT else total_orig
-
               print(f"Processing {pdf_name}: {total_orig} pages -> {total_images} images after split")
 
               # Step 1: Sob image generate kore temp folder e rakho
               all_image_paths = []
               img_folder = temp_img_base / pdf_name
               img_folder.mkdir(parents=True, exist_ok=True)
-
               global_counter = 0
+
               for orig_idx in range(total_orig):
                   page = doc.load_page(orig_idx)
                   rect = page.rect
-
                   clips = []
                   if ENABLE_SPLIT:
                       mid_x = rect.x0 + rect.width / 2
@@ -86,11 +85,11 @@ jobs:
                   for clip_idx, clip in enumerate(clips):
                       side = "LEFT" if clip_idx==0 else "RIGHT" if ENABLE_SPLIT else "FULL"
                       img_bytes, fdpi, fq = render_page_clip_to_bytes(page, clip)
-                      
+
                       img_path = img_folder / f"{global_counter+1:04d}.jpg"
                       img_path.write_bytes(img_bytes)
                       all_image_paths.append(img_path)
-                      
+
                       print(f"  Orig {orig_idx+1} {side} -> Img {global_counter+1} : {len(img_bytes)/1024:.1f}KB [dpi={fdpi}, q={fq}]")
                       global_counter += 1
 
@@ -107,29 +106,18 @@ jobs:
 
                   # Notun PDF banabo A4 size e
                   new_doc = pymupdf.open()
-                  
+
                   for img_path in chunk_images:
                       # A4 page: 595 x 842 points
                       a4_page = new_doc.new_page(width=595, height=842)
                       # Image ta A4 page er vitore fit korabo
-                      # OCR er jonno full page cover korle valo
                       a4_page.insert_image(a4_page.rect, filename=str(img_path))
 
-                  # PDF er naam
-                  if num_pdf_parts == 1:
+                  # PDF er naam logic
+                  if num_pdf_parts == 1 or p_idx == 0:
                       pdf_out_name = f"{pdf_name}.pdf"
                   else:
-                      pdf_out_name = f"{pdf_name}_p{p_idx+1}.pdf" if p_idx > 0 else f"{pdf_name}.pdf"
-                      if num_pdf_parts > 1 and p_idx == 0:
-                         # prothom ta pdf_name.pdf, porer gulo pdf_name_p2.pdf
-                         pdf_out_name = f"{pdf_name}.pdf" if p_idx==0 else f"{pdf_name}_p{p_idx+1}.pdf"
-                         # uporer logic ta simple rakhar jonno:
-                  if num_pdf_parts > 1:
-                      pdf_out_name = f"{pdf_name}_p{p_idx+1}.pdf" if p_idx > 0 else f"{pdf_name}.pdf"
-                      if p_idx==0 and num_pdf_parts>1:
-                          pdf_out_name = f"{pdf_name}.pdf"
-                      # Correction: 1-50 = pdf_name.pdf, 51-100 = pdf_name_p2.pdf
-                      pdf_out_name = f"{pdf_name}.pdf" if p_idx == 0 else f"{pdf_name}_p{p_idx+1}.pdf"
+                      pdf_out_name = f"{pdf_name}_p{p_idx+1}.pdf"
 
                   out_path = out_base / pdf_out_name
                   new_doc.save(str(out_path), garbage=4, deflate=True)
