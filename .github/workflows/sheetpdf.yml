@@ -1,0 +1,171 @@
+name: PDF to Image and Zip
+
+on:
+  workflow_dispatch:
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install --upgrade pymupdf
+
+      - name: Convert PDF to Images - Split Left-Right + 1 to 200 per zip (max 500KB per image)
+        shell: python
+        run: |
+          import pymupdf
+          import zipfile
+          from pathlib import Path
+          import math
+
+          pdf_dir = Path("pdf")
+          out_base = Path("images")
+          out_base.mkdir(parents=True, exist_ok=True)
+
+          BATCH = 200  # 1-200 ek zip
+          MAX_SIZE_BYTES = 500 * 1024  # 500KB
+          ENABLE_SPLIT = True  # True korle prottek page 2 vag hobe left-right
+
+          def render_page_clip(page, clip_rect):
+              """ekta page er nirdisto clip ke 500KB er moddhe JPG banay"""
+              dpi = 300
+              quality = 95
+              while True:
+                  pix = page.get_pixmap(dpi=dpi, alpha=False, clip=clip_rect)
+                  img_bytes = pix.tobytes("jpg", jpg_quality=quality)
+                  if len(img_bytes) <= MAX_SIZE_BYTES:
+                      return img_bytes, dpi, quality
+                  if quality > 35:
+                      quality -= 5
+                  elif dpi > 150:
+                      dpi -= 25
+                      quality = 85
+                  else:
+                      # 150 dpi + 30 quality teo boro hole ja ache tai return
+                      return img_bytes, dpi, quality
+
+          for pdf_file in pdf_dir.glob("*.pdf"):
+              doc = pymupdf.open(pdf_file)
+              pdf_name = pdf_file.stem
+              total_orig = len(doc)
+              
+              # Split enable hole total image double hobe
+              total_images = total_orig * 2 if ENABLE_SPLIT else total_orig
+              parts = math.ceil(total_images / BATCH)
+
+              print(f"{pdf_name}: {total_orig} orig pages -> {total_images} images (split={ENABLE_SPLIT}) -> {parts} zip")
+
+              global_img_counter = 0  # 1,2,3,4... final jpg er number
+
+              for p in range(parts):
+                  start_img = p * BATCH
+                  end_img = min(start_img + BATCH, total_images)
+
+                  tmp_dir = out_base / f"tmp_{pdf_name}_p{p+1}"
+                  tmp_dir.mkdir(parents=True, exist_ok=True)
+
+                  # Ei batch e kon original page lagbe ta ber koro
+                  # global_img_counter diye track korbo
+                  while global_img_counter < end_img:
+                      orig_page_idx = global_img_counter // 2 if ENABLE_SPLIT else global_img_counter
+                      is_left = (global_img_counter % 2 == 0) if ENABLE_SPLIT else True
+                      is_right = not is_left
+
+                      if orig_page_idx >= total_orig:
+                          break
+
+                      page = doc.load_page(orig_page_idx)
+                      rect = page.rect
+                      
+                      if ENABLE_SPLIT:
+                          mid_x = rect.x0 + rect.width / 2
+                          if is_left:
+                              clip = pymupdf.Rect(rect.x0, rect.y0, mid_x, rect.y1)
+                              side = "LEFT"
+                          else:
+                              clip = pymupdf.Rect(mid_x, rect.y0, rect.x1, rect.y1)
+                              side = "RIGHT"
+                      else:
+                          clip = rect
+                          side = "FULL"
+
+                      img_bytes, final_dpi, final_q = render_page_clip(page, clip)
+
+                      output_path = tmp_dir / f"{global_img_counter+1:04d}.jpg"
+                      output_path.write_bytes(img_bytes)
+
+                      status = "OK" if len(img_bytes) <= MAX_SIZE_BYTES else f"WARN {len(img_bytes)/1024:.1f}KB >500KB"
+                      print(f"  Orig Page {orig_page_idx+1} {side} -> Img {global_img_counter+1}: {len(img_bytes)/1024:.1f}KB [dpi={final_dpi}, q={final_q}] {status}")
+
+                      global_img_counter += 1
+                      
+                      # jodi FULL mode hoy tahole ekbar e ekta image
+                      if not ENABLE_SPLIT:
+                          continue
+                      # Split mode e left er por right o same batch e hote pare, tai loop cholbe
+
+                      # kintu batch sesh hole break kore next zip e jabe
+                      if global_img_counter >= end_img:
+                          break
+
+                  # zip name: pdf1.zip = 1-200, pdf1_p2.zip = 201-400
+                  if parts == 1:
+                      zip_name = f"{pdf_name}.zip"
+                  else:
+                      zip_name = f"{pdf_name}_p{p+1}.zip" if p > 0 else f"{pdf_name}.zip"
+
+                  zip_path = out_base / zip_name
+                  with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
+                      for img in sorted(tmp_dir.glob("*.jpg")):
+                          z.write(img, img.name)
+
+                  # temp folder delete
+                  for f in tmp_dir.glob("*"): f.unlink()
+                  tmp_dir.rmdir()
+
+                  print(f" -> Created {zip_name} [ {start_img+1} to {end_img} ]")
+
+              doc.close()
+
+      - name: Create matrix
+        id: set-matrix
+        run: |
+          cd images
+          MATRIX=$(ls *.zip | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+
+      - name: Temp upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: temp-zips
+          path: images/*.zip
+
+  # PROTITA ZIP ALADA ARTIFACT HOBE
+  upload-separate:
+    needs: convert
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        zipfile: ${{ fromJson(needs.convert.outputs.matrix) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: temp-zips
+          path: zips
+
+      - name: Upload ${{ matrix.zipfile }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.zipfile }}
+          path: zips/${{ matrix.zipfile }}
+          retention-days: 7
