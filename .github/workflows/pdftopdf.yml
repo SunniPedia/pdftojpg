@@ -36,13 +36,12 @@ jobs:
           out_base.mkdir(parents=True, exist_ok=True)
           temp_img_base.mkdir(parents=True, exist_ok=True)
 
-          # --- SETTINGS (sob ager moto ache) ---
+          # --- SETTINGS ---
           MAX_SIZE_BYTES = 500 * 1024  # 500KB per image
           ENABLE_SPLIT = True          # True hole proti page 2 vag hobe left-right
-          PDF_PAGE_BATCH = 50          # Notun: Proti PDF e 50 page
+          PDF_PAGE_BATCH = 50          # Proti PDF e 50 page
 
           def render_page_clip_to_bytes(page, clip_rect):
-              """Ager logic tai - 500KB er moddhe JPG banay"""
               dpi = 300
               quality = 95
               while True:
@@ -95,7 +94,7 @@ jobs:
 
               doc.close()
 
-              # Step 2: Ebar sei image gulo diye 50 page kore PDF banao (OCR er jonno)
+              # Step 2: 50 page kore PDF banao
               num_pdf_parts = math.ceil(len(all_image_paths) / PDF_PAGE_BATCH)
               print(f" -> Creating {num_pdf_parts} OCR-PDFs (50 pages each)")
 
@@ -104,16 +103,13 @@ jobs:
                   end = min(start + PDF_PAGE_BATCH, len(all_image_paths))
                   chunk_images = all_image_paths[start:end]
 
-                  # Notun PDF banabo A4 size e
                   new_doc = pymupdf.open()
 
                   for img_path in chunk_images:
-                      # A4 page: 595 x 842 points
                       a4_page = new_doc.new_page(width=595, height=842)
-                      # Image ta A4 page er vitore fit korabo
                       a4_page.insert_image(a4_page.rect, filename=str(img_path))
 
-                  # PDF er naam logic
+                  # Part naming logic
                   if num_pdf_parts == 1 or p_idx == 0:
                       pdf_out_name = f"{pdf_name}.pdf"
                   else:
@@ -140,7 +136,6 @@ jobs:
           name: temp-pdfs
           path: final_pdfs/*.pdf
 
-  # PROTITA 50-PAGE PDF ALADA ARTIFACT HOBE
   upload-separate:
     needs: convert
     runs-on: ubuntu-latest
@@ -148,14 +143,22 @@ jobs:
       matrix:
         pdffile: ${{ fromJson(needs.convert.outputs.matrix) }}
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download all temp PDFs
+        uses: actions/download-artifact@v4
         with:
           name: temp-pdfs
           path: pdfs
 
-      - name: Upload ${{ matrix.pdffile }}
+      - name: Clean filename for Artifact name
+        id: clean-name
+        run: |
+          # Artifact name-e .pdf chara simple nam dawa hocche
+          CLEAN_NAME=$(echo "${{ matrix.pdffile }}" | sed 's/\.pdf$//')
+          echo "artifact_name=$CLEAN_NAME" >> $GITHUB_OUTPUT
+
+      - name: Upload ${{ matrix.pdffile }} separately
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.pdffile }}
+          name: ${{ steps.clean-name.outputs.artifact_name }}
           path: pdfs/${{ matrix.pdffile }}
           retention-days: 7
