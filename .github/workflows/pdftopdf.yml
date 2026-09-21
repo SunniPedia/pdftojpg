@@ -1,0 +1,173 @@
+name: PDF to Image -> OCR PDF (50 pages)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install --upgrade pymupdf
+
+      - name: Convert PDF -> Split Images -> OCR PDF (50 pages per PDF)
+        shell: python
+        run: |
+          import pymupdf
+          from pathlib import Path
+          import math
+          import io
+          from PIL import Image
+
+          pdf_dir = Path("pdf")
+          out_base = Path("final_pdfs")
+          temp_img_base = Path("temp_all_images")
+          out_base.mkdir(parents=True, exist_ok=True)
+          temp_img_base.mkdir(parents=True, exist_ok=True)
+
+          # --- SETTINGS (sob ager moto ache) ---
+          MAX_SIZE_BYTES = 500 * 1024  # 500KB per image
+          ENABLE_SPLIT = True          # True hole proti page 2 vag hobe left-right
+          PDF_PAGE_BATCH = 50          # Notun: Proti PDF e 50 page
+
+          def render_page_clip_to_bytes(page, clip_rect):
+              """Ager logic tai - 500KB er moddhe JPG banay"""
+              dpi = 300
+              quality = 95
+              while True:
+                  pix = page.get_pixmap(dpi=dpi, alpha=False, clip=clip_rect)
+                  img_bytes = pix.tobytes("jpg", jpg_quality=quality)
+                  if len(img_bytes) <= MAX_SIZE_BYTES:
+                      return img_bytes, dpi, quality
+                  if quality > 35:
+                      quality -= 5
+                  elif dpi > 150:
+                      dpi -= 25
+                      quality = 85
+                  else:
+                      return img_bytes, dpi, quality
+
+          for pdf_file in pdf_dir.glob("*.pdf"):
+              doc = pymupdf.open(pdf_file)
+              pdf_name = pdf_file.stem
+              total_orig = len(doc)
+              total_images = total_orig * 2 if ENABLE_SPLIT else total_orig
+
+              print(f"Processing {pdf_name}: {total_orig} pages -> {total_images} images after split")
+
+              # Step 1: Sob image generate kore temp folder e rakho
+              all_image_paths = []
+              img_folder = temp_img_base / pdf_name
+              img_folder.mkdir(parents=True, exist_ok=True)
+
+              global_counter = 0
+              for orig_idx in range(total_orig):
+                  page = doc.load_page(orig_idx)
+                  rect = page.rect
+
+                  clips = []
+                  if ENABLE_SPLIT:
+                      mid_x = rect.x0 + rect.width / 2
+                      clips.append(pymupdf.Rect(rect.x0, rect.y0, mid_x, rect.y1)) # LEFT
+                      clips.append(pymupdf.Rect(mid_x, rect.y0, rect.x1, rect.y1)) # RIGHT
+                  else:
+                      clips.append(rect)
+
+                  for clip_idx, clip in enumerate(clips):
+                      side = "LEFT" if clip_idx==0 else "RIGHT" if ENABLE_SPLIT else "FULL"
+                      img_bytes, fdpi, fq = render_page_clip_to_bytes(page, clip)
+                      
+                      img_path = img_folder / f"{global_counter+1:04d}.jpg"
+                      img_path.write_bytes(img_bytes)
+                      all_image_paths.append(img_path)
+                      
+                      print(f"  Orig {orig_idx+1} {side} -> Img {global_counter+1} : {len(img_bytes)/1024:.1f}KB [dpi={fdpi}, q={fq}]")
+                      global_counter += 1
+
+              doc.close()
+
+              # Step 2: Ebar sei image gulo diye 50 page kore PDF banao (OCR er jonno)
+              num_pdf_parts = math.ceil(len(all_image_paths) / PDF_PAGE_BATCH)
+              print(f" -> Creating {num_pdf_parts} OCR-PDFs (50 pages each)")
+
+              for p_idx in range(num_pdf_parts):
+                  start = p_idx * PDF_PAGE_BATCH
+                  end = min(start + PDF_PAGE_BATCH, len(all_image_paths))
+                  chunk_images = all_image_paths[start:end]
+
+                  # Notun PDF banabo A4 size e
+                  new_doc = pymupdf.open()
+                  
+                  for img_path in chunk_images:
+                      # A4 page: 595 x 842 points
+                      a4_page = new_doc.new_page(width=595, height=842)
+                      # Image ta A4 page er vitore fit korabo
+                      # OCR er jonno full page cover korle valo
+                      a4_page.insert_image(a4_page.rect, filename=str(img_path))
+
+                  # PDF er naam
+                  if num_pdf_parts == 1:
+                      pdf_out_name = f"{pdf_name}.pdf"
+                  else:
+                      pdf_out_name = f"{pdf_name}_p{p_idx+1}.pdf" if p_idx > 0 else f"{pdf_name}.pdf"
+                      if num_pdf_parts > 1 and p_idx == 0:
+                         # prothom ta pdf_name.pdf, porer gulo pdf_name_p2.pdf
+                         pdf_out_name = f"{pdf_name}.pdf" if p_idx==0 else f"{pdf_name}_p{p_idx+1}.pdf"
+                         # uporer logic ta simple rakhar jonno:
+                  if num_pdf_parts > 1:
+                      pdf_out_name = f"{pdf_name}_p{p_idx+1}.pdf" if p_idx > 0 else f"{pdf_name}.pdf"
+                      if p_idx==0 and num_pdf_parts>1:
+                          pdf_out_name = f"{pdf_name}.pdf"
+                      # Correction: 1-50 = pdf_name.pdf, 51-100 = pdf_name_p2.pdf
+                      pdf_out_name = f"{pdf_name}.pdf" if p_idx == 0 else f"{pdf_name}_p{p_idx+1}.pdf"
+
+                  out_path = out_base / pdf_out_name
+                  new_doc.save(str(out_path), garbage=4, deflate=True)
+                  new_doc.close()
+
+                  print(f"  -> Created {pdf_out_name} [{start+1} to {end}]")
+
+              print(f"Done {pdf_name}")
+
+      - name: Create matrix for PDFs
+        id: set-matrix
+        run: |
+          cd final_pdfs
+          MATRIX=$(ls *.pdf | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+
+      - name: Temp upload PDFs
+        uses: actions/upload-artifact@v4
+        with:
+          name: temp-pdfs
+          path: final_pdfs/*.pdf
+
+  # PROTITA 50-PAGE PDF ALADA ARTIFACT HOBE
+  upload-separate:
+    needs: convert
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        pdffile: ${{ fromJson(needs.convert.outputs.matrix) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: temp-pdfs
+          path: pdfs
+
+      - name: Upload ${{ matrix.pdffile }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.pdffile }}
+          path: pdfs/${{ matrix.pdffile }}
+          retention-days: 7
