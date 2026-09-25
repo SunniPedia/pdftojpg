@@ -39,11 +39,15 @@ AYAH_MARK_RE = re.compile(r"۝\s*[٠-٩]+")
 HEADER_HINT_RE = re.compile(r"গাউসিয়া তারবিয়াতী নেসাব|[০-৯]{1,4}\s*\.{3,}")
 
 
-def find_page_image(img_dir: Path, page: int) -> Path | None:
-    for ext in (".jpg", ".jpeg", ".png"):
-        candidate = img_dir / f"{page}{ext}"
-        if candidate.exists():
-            return candidate
+def find_page_image(img_dir: Path, page: int, width_hint: int) -> Path | None:
+    # আগে leading-zero সহ চেষ্টা (যেমন 0535.jpg, ইনপুট যত ডিজিটের ছিল সেই width),
+    # না পেলে plain নম্বর (535.jpg) দিয়ে চেষ্টা
+    candidates = [str(page).zfill(width_hint), str(page)]
+    for name in candidates:
+        for ext in (".jpg", ".jpeg", ".png", ".JPG", ".PNG"):
+            candidate = img_dir / f"{name}{ext}"
+            if candidate.exists():
+                return candidate
     return None
 
 
@@ -126,14 +130,22 @@ def apply_rules(lines: list[str], page: int, warnings: list[str]) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--img-dir", required=True)
-    ap.add_argument("--page-from", required=True, type=int)
-    ap.add_argument("--page-to", required=True, type=int)
+    ap.add_argument("--page-from", required=True)  # string হিসেবে নেওয়া হলো, leading zero রক্ষা করতে
+    ap.add_argument("--page-to", required=True)
     ap.add_argument("--output", required=True)
     args = ap.parse_args()
 
     img_dir = Path(args.img_dir)
+    if not img_dir.exists():
+        print(f"ত্রুটি: img ফোল্ডার পাওয়া যায়নি: {img_dir.resolve()}", file=sys.stderr)
+        sys.exit(1)
+
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    width_hint = len(args.page_from)  # ইনপুটে যত ডিজিট (যেমন "0535" -> 4), সেই অনুযায়ী zero-pad
+    page_from = int(args.page_from)
+    page_to = int(args.page_to)
 
     print("EasyOCR মডেল লোড হচ্ছে (bn+en, ar)...", file=sys.stderr)
     reader_bn = easyocr.Reader(["bn", "en"], gpu=False)
@@ -142,8 +154,8 @@ def main():
     all_pages = []
     warnings = []
 
-    for page in range(args.page_from, args.page_to + 1):
-        image_path = find_page_image(img_dir, page)
+    for page in range(page_from, page_to + 1):
+        image_path = find_page_image(img_dir, page, width_hint)
         if image_path is None:
             warnings.append(f"[page {page}] ছবি পাওয়া যায়নি, স্কিপ করা হলো")
             continue
