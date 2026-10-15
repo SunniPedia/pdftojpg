@@ -1,0 +1,275 @@
+name: RizwanPDF to Image and Zip
+
+on:
+  workflow_dispatch:
+    inputs:
+      split:
+        description: 'Split each page into Left-Right (2 images per page)?'
+        type: boolean
+        default: true
+      source:
+        description: 'PDF source: folder = all PDFs in folder | file = specific PDF(s) | download = direct link'
+        type: choice
+        options:
+          - folder
+          - file
+          - download
+        default: folder
+      folder_path:
+        description: 'Repo folder that holds PDFs (used for folder/file). Empty = pdf'
+        type: string
+        required: false
+        default: 'pdf'
+      pdf_file:
+        description: '[file mode] PDF name e.g. book or book.pdf (comma separated for multiple)'
+        type: string
+        required: false
+        default: ''
+      download_url:
+        description: '[download mode] Direct PDF link(s) or Google Drive link(s), comma or space separated'
+        type: string
+        required: false
+        default: ''
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install --upgrade pymupdf gdown
+
+      - name: Convert PDF to Images - Split Left-Right + 1 to 200 per zip (Original Quality)
+        shell: python
+        env:
+          SPLIT_INPUT: ${{ inputs.split }}
+          SOURCE_INPUT: ${{ inputs.source }}
+          FOLDER_INPUT: ${{ inputs.folder_path }}
+          PDF_INPUT: ${{ inputs.pdf_file }}
+          URL_INPUT: ${{ inputs.download_url }}
+        run: |
+          import os
+          import re
+          import urllib.request
+          import urllib.parse
+          import pymupdf
+          import zipfile
+          from pathlib import Path
+          import math
+
+          out_base = Path("images")
+          out_base.mkdir(parents=True, exist_ok=True)
+
+          BATCH = 200  # 1-200 ek zip
+          # Run workflow er checkbox theke true/false ashbe
+          ENABLE_SPLIT = os.environ.get("SPLIT_INPUT", "true").strip().lower() == "true"  # True korle prottek page 2 vag hobe left-right
+
+          SOURCE = os.environ.get("SOURCE_INPUT", "folder").strip().lower()
+          FOLDER = Path(os.environ.get("FOLDER_INPUT", "").strip() or "pdf")
+          PDF_INPUT = os.environ.get("PDF_INPUT", "").strip()
+          URL_INPUT = os.environ.get("URL_INPUT", "").strip()
+
+          print(f"ENABLE_SPLIT = {ENABLE_SPLIT}")
+          print(f"SOURCE = {SOURCE}")
+
+          def safe_name(name):
+              """file name ke safe banay (path/ ajaira char bad)"""
+              name = Path(urllib.parse.unquote(name)).name
+              name = re.sub(r"[^\w.\- ]", "_", name).strip()
+              return name or "download.pdf"
+
+          def download_pdf(url, idx, dl_dir):
+              """direct link ba Google Drive link theke PDF namay"""
+              if "drive.google.com" in url or "docs.google.com" in url:
+                  import gdown
+                  res = gdown.download(url, output=str(dl_dir) + "/", quiet=False, fuzzy=True)
+                  if not res:
+                      raise SystemExit(f"ERROR: Google Drive theke download hoyni: {url}")
+                  path = Path(res)
+              else:
+                  req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                  with urllib.request.urlopen(req, timeout=300) as resp:
+                      data = resp.read()
+                      cd = resp.headers.get("Content-Disposition", "")
+                  name = ""
+                  m = re.search(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)\"?", cd)
+                  if m:
+                      name = m.group(1)
+                  if not name:
+                      name = Path(urllib.parse.urlparse(url).path).name
+                  name = safe_name(name) if name else f"download_{idx}.pdf"
+                  if not name.lower().endswith(".pdf"):
+                      name += ".pdf"
+                  path = dl_dir / name
+                  path.write_bytes(data)
+              # asol PDF kina check
+              with open(path, "rb") as fh:
+                  if not fh.read(5).startswith(b"%PDF"):
+                      raise SystemExit(f"ERROR: {path.name} PDF na. Direct download link ache kina dekho: {url}")
+              print(f"Downloaded: {path.name} ({path.stat().st_size/1024/1024:.2f} MB)")
+              return path
+
+          # ---------- PDF list toiri ----------
+          if SOURCE == "download":
+              if not URL_INPUT:
+                  raise SystemExit("ERROR: download mode e download_url dite hobe")
+              dl_dir = Path("downloads")
+              dl_dir.mkdir(parents=True, exist_ok=True)
+              urls = [u for u in re.split(r"[,\s]+", URL_INPUT) if u]
+              pdf_files = [download_pdf(u, i, dl_dir) for i, u in enumerate(urls, 1)]
+              print(f"Download mode -> {[f.name for f in pdf_files]}")
+
+          elif SOURCE == "file":
+              if not PDF_INPUT:
+                  raise SystemExit("ERROR: file mode e pdf_file er nam dite hobe")
+              pdf_files = []
+              for name in PDF_INPUT.split(","):
+                  name = Path(name.strip()).name  # sudhu file name, path na
+                  if not name:
+                      continue
+                  if not name.lower().endswith(".pdf"):
+                      name += ".pdf"
+                  f = FOLDER / name
+                  if not f.exists():
+                      raise SystemExit(f"ERROR: {f} paoa jayni. folder e file ache kina ar nam (boro/choto hater) thik ache kina dekho")
+                  pdf_files.append(f)
+              print(f"File mode -> {[str(f) for f in pdf_files]}")
+
+          else:  # folder
+              if not FOLDER.is_dir():
+                  raise SystemExit(f"ERROR: folder paoa jayni: {FOLDER}")
+              pdf_files = sorted(FOLDER.glob("*.pdf"))
+              if not pdf_files:
+                  raise SystemExit(f"ERROR: {FOLDER} folder e kono PDF nei")
+              print(f"Folder mode ({FOLDER}) -> processing ALL: {[f.name for f in pdf_files]}")
+
+          def render_page_clip(page, clip_rect):
+              """ekta page er nirdisto clip ke original quality te JPG banay"""
+              dpi = 300
+              quality = 95
+              pix = page.get_pixmap(dpi=dpi, alpha=False, clip=clip_rect)
+              img_bytes = pix.tobytes("jpg", jpg_quality=quality)
+              return img_bytes
+
+          for pdf_file in pdf_files:
+              doc = pymupdf.open(pdf_file)
+              pdf_name = pdf_file.stem
+              total_orig = len(doc)
+              
+              # Split enable hole total image double hobe
+              total_images = total_orig * 2 if ENABLE_SPLIT else total_orig
+              parts = math.ceil(total_images / BATCH)
+
+              print(f"{pdf_name}: {total_orig} orig pages -> {total_images} images (split={ENABLE_SPLIT}) -> {parts} zip")
+
+              global_img_counter = 0  # 1,2,3,4... final jpg er number
+
+              for p in range(parts):
+                  start_img = p * BATCH
+                  end_img = min(start_img + BATCH, total_images)
+
+                  tmp_dir = out_base / f"tmp_{pdf_name}_p{p+1}"
+                  tmp_dir.mkdir(parents=True, exist_ok=True)
+
+                  # Ei batch e kon original page lagbe ta ber koro
+                  # global_img_counter diye track korbo
+                  while global_img_counter < end_img:
+                      orig_page_idx = global_img_counter // 2 if ENABLE_SPLIT else global_img_counter
+                      is_left = (global_img_counter % 2 == 0) if ENABLE_SPLIT else True
+                      is_right = not is_left
+
+                      if orig_page_idx >= total_orig:
+                          break
+
+                      page = doc.load_page(orig_page_idx)
+                      rect = page.rect
+                      
+                      if ENABLE_SPLIT:
+                          mid_x = rect.x0 + rect.width / 2
+                          if is_left:
+                              clip = pymupdf.Rect(rect.x0, rect.y0, mid_x, rect.y1)
+                              side = "LEFT"
+                          else:
+                              clip = pymupdf.Rect(mid_x, rect.y0, rect.x1, rect.y1)
+                              side = "RIGHT"
+                      else:
+                          clip = rect
+                          side = "FULL"
+
+                      img_bytes = render_page_clip(page, clip)
+
+                      output_path = tmp_dir / f"{global_img_counter+1:04d}.jpg"
+                      output_path.write_bytes(img_bytes)
+
+                      print(f"  Orig Page {orig_page_idx+1} {side} -> Img {global_img_counter+1}: {len(img_bytes)/1024:.1f}KB")
+
+                      global_img_counter += 1
+                      
+                      # jodi FULL mode hoy tahole ekbar e ekta image
+                      if not ENABLE_SPLIT:
+                          continue
+
+                      # kintu batch sesh hole break kore next zip e jabe
+                      if global_img_counter >= end_img:
+                          break
+
+                  # zip name: pdf1.zip = 1-200, pdf1_p2.zip = 201-400
+                  if parts == 1:
+                      zip_name = f"{pdf_name}.zip"
+                  else:
+                      zip_name = f"{pdf_name}_p{p+1}.zip" if p > 0 else f"{pdf_name}.zip"
+
+                  zip_path = out_base / zip_name
+                  with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
+                      for img in sorted(tmp_dir.glob("*.jpg")):
+                          z.write(img, img.name)
+
+                  # temp folder delete
+                  for f in tmp_dir.glob("*"): f.unlink()
+                  tmp_dir.rmdir()
+
+                  print(f" -> Created {zip_name} [ {start_img+1} to {end_img} ]")
+
+              doc.close()
+
+      - name: Create matrix
+        id: set-matrix
+        run: |
+          cd images
+          MATRIX=$(ls *.zip | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+
+      - name: Temp upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: temp-zips
+          path: images/*.zip
+
+  # PROTITA ZIP ALADA ARTIFACT HOBE
+  upload-separate:
+    needs: convert
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        zipfile: ${{ fromJson(needs.convert.outputs.matrix) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: temp-zips
+          path: zips
+
+      - name: Upload ${{ matrix.zipfile }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.zipfile }}
+          path: zips/${{ matrix.zipfile }}
+          retention-days: 7
