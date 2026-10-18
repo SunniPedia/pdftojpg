@@ -1,0 +1,296 @@
+name: RizwanPDF to Image and Push
+
+# PDF → JPG (300 DPI, quality 95) → সরাসরি রিপোর pages/ ফোল্ডারে push
+# (আগের ZIP + Artifact পদ্ধতি বাদ দেওয়া হয়েছে)
+#
+# Settings → Actions → General → Workflow permissions → "Read and write permissions" চালু থাকতে হবে।
+
+on:
+  workflow_dispatch:
+    inputs:
+      split:
+        description: 'Split each page into Left-Right (2 images per page)?'
+        type: boolean
+        default: true
+      source:
+        description: 'PDF source: folder = all PDFs in folder | file = specific PDF(s) | download = direct link'
+        type: choice
+        options:
+          - folder
+          - file
+          - download
+        default: folder
+      folder_path:
+        description: 'Repo folder that holds PDFs (used for folder/file). Empty = pdf'
+        type: string
+        required: false
+        default: 'pdf'
+      pdf_file:
+        description: '[file mode] PDF name e.g. book or book.pdf (comma separated for multiple)'
+        type: string
+        required: false
+        default: ''
+      download_url:
+        description: '[download mode] Direct PDF link(s) or Google Drive link(s), comma or space separated'
+        type: string
+        required: false
+        default: ''
+      output_dir:
+        description: 'Image output folder in repo (একাধিক PDF হলে প্রতিটার জন্য output_dir/<pdf_name>/ সাবফোল্ডার হবে)'
+        type: string
+        required: false
+        default: 'pages'
+      clean_output:
+        description: 'Convert করার আগে output folder এর পুরোনো image (jpg/jpeg/png/webp) মুছবে?'
+        type: boolean
+        default: false
+      push_batch:
+        description: 'কয়টি image করে এক commit + push হবে (বড় push ফেল এড়াতে)'
+        type: string
+        required: false
+        default: '50'
+
+permissions:
+  contents: write
+
+# একসাথে দুইটা রান চললে push conflict হতে পারে
+concurrency:
+  group: pdf-to-images
+  cancel-in-progress: false
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install --upgrade pymupdf gdown
+
+      - name: Convert PDF to Images - Split Left-Right (Original Quality) into output folder
+        shell: python
+        env:
+          SPLIT_INPUT: ${{ inputs.split }}
+          SOURCE_INPUT: ${{ inputs.source }}
+          FOLDER_INPUT: ${{ inputs.folder_path }}
+          PDF_INPUT: ${{ inputs.pdf_file }}
+          URL_INPUT: ${{ inputs.download_url }}
+          OUTPUT_INPUT: ${{ inputs.output_dir }}
+          CLEAN_INPUT: ${{ inputs.clean_output }}
+        run: |
+          import os
+          import re
+          import urllib.request
+          import urllib.parse
+          import pymupdf
+          from pathlib import Path
+
+          OUT_BASE = Path(os.environ.get("OUTPUT_INPUT", "").strip() or "pages")
+          OUT_BASE.mkdir(parents=True, exist_ok=True)
+
+          IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
+          # Run workflow er checkbox theke true/false ashbe
+          ENABLE_SPLIT = os.environ.get("SPLIT_INPUT", "true").strip().lower() == "true"  # True korle prottek page 2 vag hobe left-right
+          CLEAN = os.environ.get("CLEAN_INPUT", "false").strip().lower() == "true"
+
+          SOURCE = os.environ.get("SOURCE_INPUT", "folder").strip().lower()
+          FOLDER = Path(os.environ.get("FOLDER_INPUT", "").strip() or "pdf")
+          PDF_INPUT = os.environ.get("PDF_INPUT", "").strip()
+          URL_INPUT = os.environ.get("URL_INPUT", "").strip()
+
+          print(f"ENABLE_SPLIT = {ENABLE_SPLIT}")
+          print(f"SOURCE = {SOURCE}")
+          print(f"OUTPUT = {OUT_BASE}  (clean={CLEAN})")
+
+          def safe_name(name):
+              """file name ke safe banay (path/ ajaira char bad)"""
+              name = Path(urllib.parse.unquote(name)).name
+              name = re.sub(r"[^\w.\- ]", "_", name).strip()
+              return name or "download.pdf"
+
+          def download_pdf(url, idx, dl_dir):
+              """direct link ba Google Drive link theke PDF namay"""
+              if "drive.google.com" in url or "docs.google.com" in url:
+                  import gdown
+                  res = gdown.download(url, output=str(dl_dir) + "/", quiet=False, fuzzy=True)
+                  if not res:
+                      raise SystemExit(f"ERROR: Google Drive theke download hoyni: {url}")
+                  path = Path(res)
+              else:
+                  req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                  with urllib.request.urlopen(req, timeout=300) as resp:
+                      data = resp.read()
+                      cd = resp.headers.get("Content-Disposition", "")
+                  name = ""
+                  m = re.search(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)\"?", cd)
+                  if m:
+                      name = m.group(1)
+                  if not name:
+                      name = Path(urllib.parse.urlparse(url).path).name
+                  name = safe_name(name) if name else f"download_{idx}.pdf"
+                  if not name.lower().endswith(".pdf"):
+                      name += ".pdf"
+                  path = dl_dir / name
+                  path.write_bytes(data)
+              # asol PDF kina check
+              with open(path, "rb") as fh:
+                  if not fh.read(5).startswith(b"%PDF"):
+                      raise SystemExit(f"ERROR: {path.name} PDF na. Direct download link ache kina dekho: {url}")
+              print(f"Downloaded: {path.name} ({path.stat().st_size/1024/1024:.2f} MB)")
+              return path
+
+          # ---------- PDF list toiri ----------
+          if SOURCE == "download":
+              if not URL_INPUT:
+                  raise SystemExit("ERROR: download mode e download_url dite hobe")
+              dl_dir = Path("downloads")
+              dl_dir.mkdir(parents=True, exist_ok=True)
+              urls = [u for u in re.split(r"[,\s]+", URL_INPUT) if u]
+              pdf_files = [download_pdf(u, i, dl_dir) for i, u in enumerate(urls, 1)]
+              print(f"Download mode -> {[f.name for f in pdf_files]}")
+
+          elif SOURCE == "file":
+              if not PDF_INPUT:
+                  raise SystemExit("ERROR: file mode e pdf_file er nam dite hobe")
+              pdf_files = []
+              for name in PDF_INPUT.split(","):
+                  name = Path(name.strip()).name  # sudhu file name, path na
+                  if not name:
+                      continue
+                  if not name.lower().endswith(".pdf"):
+                      name += ".pdf"
+                  f = FOLDER / name
+                  if not f.exists():
+                      raise SystemExit(f"ERROR: {f} paoa jayni. folder e file ache kina ar nam (boro/choto hater) thik ache kina dekho")
+                  pdf_files.append(f)
+              print(f"File mode -> {[str(f) for f in pdf_files]}")
+
+          else:  # folder
+              if not FOLDER.is_dir():
+                  raise SystemExit(f"ERROR: folder paoa jayni: {FOLDER}")
+              pdf_files = sorted(FOLDER.glob("*.pdf"))
+              if not pdf_files:
+                  raise SystemExit(f"ERROR: {FOLDER} folder e kono PDF nei")
+              print(f"Folder mode ({FOLDER}) -> processing ALL: {[f.name for f in pdf_files]}")
+
+          # ---------- purono image muche fela (optional) ----------
+          if CLEAN:
+              removed = 0
+              for f in OUT_BASE.rglob("*"):
+                  if f.is_file() and f.suffix.lower() in IMG_EXTS:
+                      f.unlink()
+                      removed += 1
+              print(f"Clean: {removed} ta purono image muche fela hoyeche ({OUT_BASE})")
+
+          def render_page_clip(page, clip_rect):
+              """ekta page er nirdisto clip ke original quality te JPG banay"""
+              dpi = 300
+              quality = 95
+              pix = page.get_pixmap(dpi=dpi, alpha=False, clip=clip_rect)
+              img_bytes = pix.tobytes("jpg", jpg_quality=quality)
+              return img_bytes
+
+          MULTI = len(pdf_files) > 1  # ekadhik PDF hole alada subfolder, noile direct output folder e
+
+          for pdf_file in pdf_files:
+              doc = pymupdf.open(pdf_file)
+              pdf_name = pdf_file.stem
+              total_orig = len(doc)
+
+              target = (OUT_BASE / safe_name(pdf_name)) if MULTI else OUT_BASE
+              target.mkdir(parents=True, exist_ok=True)
+
+              # Split enable hole total image double hobe
+              total_images = total_orig * 2 if ENABLE_SPLIT else total_orig
+              print(f"{pdf_name}: {total_orig} orig pages -> {total_images} images (split={ENABLE_SPLIT}) -> {target}/")
+
+              img_counter = 0  # 1,2,3,4... final jpg er number (0001.jpg, 0002.jpg ...)
+
+              for orig_page_idx in range(total_orig):
+                  page = doc.load_page(orig_page_idx)
+                  rect = page.rect
+
+                  if ENABLE_SPLIT:
+                      mid_x = rect.x0 + rect.width / 2
+                      clips = [
+                          ("LEFT",  pymupdf.Rect(rect.x0, rect.y0, mid_x, rect.y1)),
+                          ("RIGHT", pymupdf.Rect(mid_x, rect.y0, rect.x1, rect.y1)),
+                      ]
+                  else:
+                      clips = [("FULL", rect)]
+
+                  for side, clip in clips:
+                      img_counter += 1
+                      img_bytes = render_page_clip(page, clip)
+
+                      output_path = target / f"{img_counter:04d}.jpg"
+                      output_path.write_bytes(img_bytes)
+
+                      print(f"  Orig Page {orig_page_idx+1} {side} -> Img {img_counter}: {len(img_bytes)/1024:.1f}KB")
+
+              doc.close()
+              print(f" -> {pdf_name}: {img_counter} images saved in {target}/")
+
+      - name: Commit and push images in batches
+        env:
+          OUT_DIR: ${{ inputs.output_dir || 'pages' }}
+          PUSH_BATCH: ${{ inputs.push_batch || '50' }}
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config http.postBuffer 524288000
+
+          # নতুন / পরিবর্তিত / মুছে ফেলা ফাইলের তালিকা (শুধু output folder)
+          git -c core.quotepath=off ls-files -m -d -o --exclude-standard -- "$OUT_DIR" | sort -u > "$RUNNER_TEMP/changed.txt"
+          TOTAL=$(wc -l < "$RUNNER_TEMP/changed.txt")
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "কোনো পরিবর্তন নেই, push করার কিছু নেই।"
+            exit 0
+          fi
+          echo "মোট $TOTAL টি ফাইল push হবে (প্রতি ব্যাচে $PUSH_BATCH টি)"
+
+          rm -rf "$RUNNER_TEMP/chunks"
+          mkdir -p "$RUNNER_TEMP/chunks"
+          split -l "$PUSH_BATCH" -d "$RUNNER_TEMP/changed.txt" "$RUNNER_TEMP/chunks/c_"
+
+          N=0
+          DONE=0
+          for chunk in "$RUNNER_TEMP"/chunks/c_*; do
+            CNT=$(wc -l < "$chunk")
+            N=$((N+1))
+            DONE=$((DONE+CNT))
+
+            git add -A --pathspec-from-file="$chunk"
+            if git diff --cached --quiet; then
+              echo "ব্যাচ $N: কোনো পরিবর্তন নেই, skip"
+              continue
+            fi
+            git commit -q -m "Add page images: batch $N ($DONE/$TOTAL)"
+
+            pushed=0
+            for i in 1 2 3 4 5; do
+              git pull --rebase --autostash -q || true
+              if git push -q; then
+                pushed=1
+                break
+              fi
+              echo "push ব্যর্থ ($i/5), আবার চেষ্টা..."
+              sleep $((i*5))
+            done
+            if [ "$pushed" -ne 1 ]; then
+              echo "::error::ব্যাচ $N push করা যায়নি"
+              exit 1
+            fi
+            echo "✔ ব্যাচ $N push হয়েছে ($DONE/$TOTAL)"
+          done
