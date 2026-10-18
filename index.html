@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="bn">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>কিতাব প্রুফিং</title>
+<style>
+  :root{--bg:#fff;--fg:#1c1c1e;--muted:#6b7280;--line:#d9dde3;--panel:#f3f4f6;--pri:#1a73e8;--ok:#188038;--warn:#b45309;--err:#c62828}
+  @media (prefers-color-scheme:dark){
+    :root{--bg:#16181c;--fg:#e8eaed;--muted:#9aa0a6;--line:#2f333a;--panel:#20242a;--pri:#8ab4f8;--ok:#81c995;--warn:#fbbc04;--err:#f28b82}
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{display:flex;flex-direction:column;height:100dvh;background:var(--bg);color:var(--fg);
+       font-family:"Noto Sans Bengali","Kalpurush","SolaimanLipi",system-ui,-apple-system,"Segoe UI",sans-serif;font-size:14px}
+  button,select,input{font:inherit;color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:5px 9px}
+  button{cursor:pointer}
+  button:active{filter:brightness(.92)}
+  button.primary{background:var(--pri);border-color:var(--pri);color:#fff}
+  @media (prefers-color-scheme:dark){button.primary{color:#0b0d10}}
+  button:disabled{opacity:.5;cursor:default}
+  header,footer{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:6px 8px;background:var(--bg)}
+  header{border-bottom:1px solid var(--line)}
+  footer{border-top:1px solid var(--line)}
+  #sel{max-width:150px}
+  #jump{width:72px}
+  #status{margin-left:auto;font-size:12px;color:var(--muted)}
+  #status.dirty{color:var(--warn);font-weight:600}
+
+  /* সবসময় পাশাপাশি (বাম-ডান), ফোনেও */
+  main{flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr}
+  main.swap .pane-img{order:2}
+  .pane{display:flex;flex-direction:column;min-width:0;min-height:0}
+  .pane-img{border-right:1px solid var(--line)}
+  main.swap .pane-img{border-right:0;border-left:1px solid var(--line)}
+  .bar{display:flex;align-items:center;gap:5px;padding:4px 6px;background:var(--panel);border-bottom:1px solid var(--line);font-size:12px;color:var(--muted)}
+  .bar button{padding:2px 8px}
+  .body{flex:1;min-height:0;overflow:auto;position:relative;-webkit-overflow-scrolling:touch}
+  #img{display:block;height:auto;max-width:none}
+  .msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:16px;color:var(--muted);pointer-events:none}
+  .msg:empty{display:none}
+  textarea{display:block;width:100%;height:100%;border:0;outline:none;resize:none;padding:10px;
+           background:var(--bg);color:var(--fg);font-family:inherit;line-height:1.9;font-size:var(--fs,20px)}
+  textarea::placeholder{color:var(--muted);opacity:.8}
+
+  dialog{border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--fg);max-width:460px;width:92vw;padding:16px}
+  dialog::backdrop{background:rgba(0,0,0,.45)}
+  dialog h3{margin:0 0 10px}
+  dialog label{display:block;margin:10px 0 3px;font-size:12px;color:var(--muted)}
+  dialog input[type=text],dialog input[type=password]{width:100%}
+  dialog .row{display:flex;gap:8px;justify-content:flex-end;margin-top:14px;flex-wrap:wrap}
+  dialog small{display:block;margin-top:4px;color:var(--muted);line-height:1.5}
+  #toast{position:fixed;left:50%;bottom:64px;transform:translateX(-50%);background:#222;color:#fff;padding:8px 14px;border-radius:8px;
+         font-size:13px;max-width:90vw;opacity:0;pointer-events:none;transition:opacity .2s;z-index:50}
+  #toast.show{opacity:1}
+  #toast.err{background:var(--err)}
+</style>
+</head>
+<body>
+
+<header>
+  <button id="btnSettings" title="সেটিংস / টোকেন">⚙</button>
+  <button id="btnReload" title="রিপো থেকে তালিকা ও বর্তমান পেইজ নতুন করে লোড করুন">⟳</button>
+  <button id="btnPrev" title="আগের পেইজ (Alt+←)">◀</button>
+  <select id="sel"></select>
+  <button id="btnNext" title="পরের পেইজ (Alt+→)">▶</button>
+  <input id="jump" type="number" min="1" inputmode="numeric" placeholder="পেইজ">
+  <button id="btnGo">যাও</button>
+  <button id="btnNextUn" title="পরের অপ্রুফড পেইজে যান">⏭ অপ্রুফড</button>
+  <button id="btnSwap" title="ছবি ও টেক্সটের পাশ বদলান">⇄</button>
+  <span id="status"></span>
+</header>
+
+<main id="main">
+  <section class="pane pane-img">
+    <div class="bar">
+      <span>ছবি</span>
+      <button id="zOut">−</button><span id="zVal">100%</span><button id="zIn">+</button><button id="zFit">ফিট</button>
+    </div>
+    <div class="body" id="imgBox">
+      <img id="img" alt="">
+      <div class="msg" id="imgMsg"></div>
+    </div>
+  </section>
+  <section class="pane pane-txt">
+    <div class="bar">
+      <span>টেক্সট</span>
+      <button id="fOut">A−</button><button id="fIn">A+</button>
+      <span id="txtInfo" title="✎ = এই ব্রাউজারে সংরক্ষিত অসংরক্ষিত খসড়ার সংখ্যা"></span>
+    </div>
+    <div class="body">
+      <textarea id="ta" spellcheck="false" dir="auto" disabled></textarea>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <button id="btnSave">💾 সেভ</button>
+  <button id="btnProof" class="primary">✓ সেভ করে পরের পেইজ</button>
+  <button id="btnToggleProof">☐ প্রুফড চিহ্ন</button>
+  <button id="btnDiscard" title="এই পেইজের অসংরক্ষিত পরিবর্তন/খসড়া বাতিল করে রিপোর টেক্সট ফিরিয়ে আনুন">🗑 খসড়া বাতিল</button>
+</footer>
+
+<dialog id="dlg">
+  <h3>সেটিংস</h3>
+  <label for="cRepo">রিপো (owner/repo)</label>
+  <input id="cRepo" type="text" placeholder="SunniPedia/pdftojpg" autocapitalize="off" autocomplete="off">
+  <label for="cBranch">ব্রাঞ্চ (খালি = ডিফল্ট ব্রাঞ্চ)</label>
+  <input id="cBranch" type="text" placeholder="main" autocapitalize="off" autocomplete="off">
+  <label for="cToken">GitHub Access Token (এখানে বসান)</label>
+  <input id="cToken" type="password" placeholder="github_pat_..." autocapitalize="off" autocomplete="off">
+  <small>টোকেন শুধু এই ব্রাউজারে সংরক্ষিত থাকে (localStorage)। HTML ফাইলে বা রিপোতে কখনো লিখবেন না। সেভ/পুশ করতে টোকেনে এই রিপোর জন্য <b>Contents: Read and write</b> অনুমতি লাগবে।</small>
+  <label for="cPages">ছবির ফোল্ডার</label>
+  <input id="cPages" type="text" autocapitalize="off">
+  <label for="cTexts">টেক্সট ফোল্ডার (না থাকলে প্রথম সেভে নিজে থেকে তৈরি হবে)</label>
+  <input id="cTexts" type="text" autocapitalize="off">
+  <label for="cProof">প্রুফড তালিকার ফাইল (না থাকলে তৈরি হবে)</label>
+  <input id="cProof" type="text" autocapitalize="off">
+  <div class="row">
+    <button id="cClearTok">টোকেন মুছুন</button>
+    <button id="cCancel">বাতিল</button>
+    <button id="cSave" class="primary">সংরক্ষণ ও সংযোগ</button>
+  </div>
+</dialog>
+
+<div id="toast"></div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const CK = 'kitab_proof_cfg_v1';      // সেটিংস + শেষ পেইজ + স্ক্রল/কার্সর অবস্থান
+  const DK = 'kitab_proof_drafts_v1';   // অসংরক্ষিত খসড়া (পেইজ ধরে ধরে)
+  const defaults = {
+    repo:'SunniPedia/pdftojpg', branch:'', token:'',
+    pagesDir:'pages', textsDir:'texts', proofFile:'proofed.json',
+    fs:20, swap:false, zoom:100, last:'', view:null
+  };
+  let cfg = {...defaults};
+  try { cfg = {...defaults, ...JSON.parse(localStorage.getItem(CK) || '{}')}; } catch(e) {}
+  if (!cfg.repo) cfg.repo = defaults.repo;
+  const saveCfg = () => { try { localStorage.setItem(CK, JSON.stringify(cfg)); } catch(e) {} };
+
+  let drafts = {};
+  try { drafts = JSON.parse(localStorage.getItem(DK) || '{}') || {}; } catch(e) { drafts = {}; }
+  const dk = stem => cfg.repo + '/' + stem;
+  let quotaWarned = false;
+  function persistDrafts() {
+    try { localStorage.setItem(DK, JSON.stringify(drafts)); return true; }
+    catch(e) {
+      if (!quotaWarned) { quotaWarned = true; toast('লোকাল স্টোরেজে খসড়া রাখা যাচ্ছে না (জায়গা শেষ?) — দ্রুত সেভ করুন', true); }
+      return false;
+    }
+  }
+
+  // ---------- স্টেট ----------
+  let images = [];            // [{name, stem}]
+  let textSet = new Set();    // যেসব পেইজের txt আছে
+  let proofed = new Set();    // প্রুফড পেইজের stem
+  let proofSha = null;
+  let cur = -1, sha = null, orig = '';
+  let seq = 0, busy = false, loadErr = false;
+  let initing = false, initFailed = false, forceInit = false;
+  let restoreOnce = true, viewReady = false;
+  const imgCache = new Map(); // name -> Promise<objectURL>
+
+  const ta = $('ta'), img = $('img'), sel = $('sel'), imgBox = $('imgBox');
+
+  // ---------- হেল্পার ----------
+  const te = new TextEncoder(), td = new TextDecoder();
+  function toB64(str){
+    const b = te.encode(str); let s = '';
+    for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+    return btoa(s);
+  }
+  function fromB64(b64){
+    const bin = atob(b64.replace(/\s/g, ''));
+    return td.decode(Uint8Array.from(bin, c => c.charCodeAt(0)));
+  }
+  const epath = p => p.split('/').map(encodeURIComponent).join('/');
+  const refQ = () => cfg.branch ? '?ref=' + encodeURIComponent(cfg.branch) : '';
+  const natCmp = (a, b) => a.localeCompare(b, undefined, {numeric: true, sensitivity: 'base'});
+  const numOf = stem => { const m = stem.match(/\d+/g); return m ? parseInt(m[m.length - 1], 10) : NaN; };
+  const dirty = () => cur >= 0 && !ta.disabled && ta.value !== orig;
+
+  let toastT;
+  function toast(msg, err, ms) {
+    const t = $('toast'); t.textContent = msg; t.className = 'show' + (err ? ' err' : '');
+    clearTimeout(toastT); toastT = setTimeout(() => t.className = '', ms || (err ? 5000 : 1800));
+  }
+
+  async function api(path, opts = {}) {
+    const headers = {
+      'Accept': 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      ...(cfg.token ? {'Authorization': 'Bearer ' + cfg.token} : {}),
+      ...(opts.headers || {})
+    };
+    // no-store: সেভের পর পুরনো (ক্যাশ করা) টেক্সট/sha ফেরত আসা ঠেকায়
+    return fetch('https://api.github.com/repos/' + cfg.repo + path, {cache: 'no-store', ...opts, headers});
+  }
+  async function errMsg(r) {
+    let m = ''; try { m = (await r.json()).message || ''; } catch(e) {}
+    let hint = '';
+    if (r.status === 401) hint = ' (টোকেন ভুল বা মেয়াদ শেষ)';
+    else if (r.status === 403) hint = ' (অনুমতি নেই বা রেট-লিমিট; টোকেন দিন)';
+    else if (r.status === 404) hint = ' (রিপো/ফোল্ডার/ফাইল পাওয়া যায়নি — নাম বা টোকেনের অ্যাক্সেস দেখুন)';
+    return r.status + ': ' + m + hint;
+  }
+
+  // ---------- খসড়া (লোকাল স্টোরেজে স্বয়ংক্রিয় সংরক্ষণ) ----------
+  let draftT;
+  function stashDraft() {
+    clearTimeout(draftT);
+    if (cur < 0 || ta.disabled) return;          // লোড চলাকালীন বা ব্যর্থ হলে খসড়া ছুঁবে না
+    const k = dk(images[cur].stem);
+    if (ta.value !== orig) drafts[k] = {t: ta.value, ts: Date.now()};
+    else if (k in drafts) delete drafts[k];
+    else return;
+    persistDrafts();
+    updateOption(cur);
+  }
+
+  // ---------- শেষ অবস্থান (স্ক্রল/কার্সর) সংরক্ষণ ----------
+  let viewT;
+  function saveView() {
+    clearTimeout(viewT);
+    if (cur < 0 || !viewReady) return;
+    cfg.view = {
+      stem: images[cur].stem,
+      it: Math.round(imgBox.scrollTop), il: Math.round(imgBox.scrollLeft),
+      tt: Math.round(ta.scrollTop), c: ta.selectionStart || 0
+    };
+    saveCfg();
+  }
+  const lazyView = () => { clearTimeout(viewT); viewT = setTimeout(saveView, 400); };
+  const flush = () => { stashDraft(); saveView(); };
+
+  // ---------- UI আপডেট ----------
+  const label = im => im.stem
+    + (proofed.has(im.stem) ? ' ✓' : '')
+    + (drafts[dk(im.stem)] ? ' ✎' : '')
+    + (textSet.has(im.stem) ? '' : ' (txt নেই)');
+  function updateOption(i) { if (sel.options[i]) sel.options[i].textContent = label(images[i]); }
+
+  function updateStatus() {
+    const st = $('status');
+    if (cur < 0) { st.textContent = ''; st.className = ''; return; }
+    const stem = images[cur].stem;
+    const d = dirty();
+    let t = (cur + 1) + '/' + images.length;
+    if (loadErr) t += ' • ⚠ টেক্সট লোড ব্যর্থ (⟳ চাপুন)';
+    else if (ta.disabled) t += ' • লোড হচ্ছে…';
+    else t += d ? ' • ⚠ অসংরক্ষিত' : (sha ? ' • সেভড' : ' • টেক্সট নেই (পেস্ট করে সেভ করুন)');
+    if (proofed.has(stem)) t += ' • ✓ প্রুফড';
+    st.textContent = t;
+    st.className = (d || loadErr) ? 'dirty' : '';
+    $('btnToggleProof').textContent = proofed.has(stem) ? '✓ প্রুফড (বাতিল করতে চাপুন)' : '☐ প্রুফড চিহ্ন';
+    const nd = Object.keys(drafts).filter(k => k.startsWith(cfg.repo + '/')).length;
+    $('txtInfo').textContent = ta.value.length + ' অক্ষর' + (nd ? ' • ✎' + nd : '');
+  }
+  function renderSelect() {
+    const keep = cur;
+    sel.innerHTML = '';
+    images.forEach((im, i) => {
+      const o = document.createElement('option');
+      o.value = i;
+      o.textContent = label(im);
+      sel.appendChild(o);
+    });
+    if (keep >= 0) sel.value = keep;
+  }
+  const applyZoom = () => { img.style.width = cfg.zoom + '%'; $('zVal').textContent = cfg.zoom + '%'; };
+  const applyFont = () => document.documentElement.style.setProperty('--fs', cfg.fs + 'px');
+  const applySwap = () => $('main').classList.toggle('swap', !!cfg.swap);
+
+  // ---------- ছবি ----------
+  function getImage(name) {
+    if (imgCache.has(name)) return imgCache.get(name);
+    const p = (async () => {
+      const r = await api('/contents/' + epath(cfg.pagesDir + '/' + name) + refQ(),
+                          {cache: 'default', headers: {'Accept': 'application/vnd.github.raw+json'}});
+      if (!r.ok) throw new Error(await errMsg(r));
+      return URL.createObjectURL(await r.blob());
+    })();
+    imgCache.set(name, p);
+    p.catch(() => imgCache.delete(name));
+    if (imgCache.size > 6) {
+      const k = imgCache.keys().next().value;
+      imgCache.get(k).then(u => URL.revokeObjectURL(u)).catch(() => {});
+      imgCache.delete(k);
+    }
+    return p;
+  }
+
+  // ---------- পেইজ লোড ----------
+  async function loadPage() {
+    const my = ++seq, im = images[cur];
+    // শেষবার বন্ধ হওয়ার অবস্থান ফেরত আনা হবে শুধু প্রথম লোডে
+    const pv = (restoreOnce && cfg.view && cfg.view.stem === im.stem) ? cfg.view : null;
+    restoreOnce = false;
+    viewReady = false; loadErr = false;
+    ta.value = ''; ta.disabled = true; ta.placeholder = ''; orig = ''; sha = null;
+    img.removeAttribute('src');
+    $('imgMsg').textContent = 'ছবি লোড হচ্ছে…';
+    updateStatus();
+
+    const imgP = getImage(im.name).then(url => new Promise(res => {
+      if (my !== seq) return res();
+      img.onload = () => {
+        if (my === seq) { $('imgMsg').textContent = ''; if (pv) imgBox.scrollTo(pv.il || 0, pv.it || 0); }
+        res();
+      };
+      img.onerror = () => { if (my === seq) $('imgMsg').textContent = 'ছবি দেখানো যায়নি'; res(); };
+      img.src = url;
+      imgBox.scrollTo(0, 0);
+    })).catch(e => { if (my === seq) $('imgMsg').textContent = 'ছবি লোড ব্যর্থ: ' + e.message; });
+
+    const txtP = (async () => {
+      const r = await api('/contents/' + epath(cfg.textsDir + '/' + im.stem + '.txt') + refQ());
+      if (my !== seq) return;
+      let ok = true;
+      if (r.status === 404) { sha = null; ta.value = ''; orig = ''; }   // ফাইল/ফোল্ডার নেই → ফাঁকা ঘর
+      else if (r.ok) {
+        const j = await r.json();
+        if (my !== seq) return;
+        sha = j.sha;
+        ta.value = j.content ? fromB64(j.content) : '';
+        orig = ta.value;   // textarea নিজে নতুন লাইন স্বাভাবিক করে, তাই তার মানই তুলনার ভিত্তি
+      } else { ok = false; toast(await errMsg(r), true); }
+      if (my !== seq) return;
+      if (ok) {
+        const k = dk(im.stem), d = drafts[k];
+        if (d && d.t !== orig) { ta.value = d.t; toast('অসংরক্ষিত খসড়া ফিরিয়ে আনা হয়েছে — সেভ করলে পুশ হবে', false, 3500); }
+        else if (d) { delete drafts[k]; persistDrafts(); }
+        ta.disabled = false; ta.scrollTop = 0;
+        ta.placeholder = 'এই পেইজের টেক্সট এখনো নেই — এখানে টেক্সট পেস্ট করে সেভ করুন';
+        updateOption(cur);
+      } else { loadErr = true; }
+      updateStatus();
+    })().catch(e => { if (my === seq) { loadErr = true; toast('টেক্সট লোড ব্যর্থ: ' + e.message, true); updateStatus(); } });
+
+    await Promise.all([imgP, txtP]);
+    if (my !== seq) return;
+    if (pv && !ta.disabled) {
+      const c = Math.min(pv.c || 0, ta.value.length);
+      try { ta.setSelectionRange(c, c); } catch(e) {}
+      ta.scrollTop = pv.tt || 0;
+    }
+    viewReady = true;
+    if (cur + 1 < images.length) getImage(images[cur + 1].name).catch(() => {}); // পরের ছবি আগাম লোড
+  }
+
+  async function go(i) {
+    if (i < 0 || i >= images.length || i === cur) { sel.value = cur; return; }
+    if (busy) { toast('সেভ চলছে, একটু অপেক্ষা করুন'); sel.value = cur; return; }
+    flush();  // বর্তমান পেইজের খসড়া লোকালে রেখে যাই (কোনো কিছু হারাবে না)
+    cur = i; cfg.last = images[i].stem;
+    if (!(restoreOnce && cfg.view && cfg.view.stem === cfg.last)) cfg.view = null;
+    saveCfg();
+    sel.value = i;
+    await loadPage();
+  }
+
+  // ---------- সেভ ----------
+  async function saveText() {
+    if (cur < 0 || ta.disabled) return false;
+    if (!dirty()) return true;
+    if (busy) return false;
+    stashDraft();                       // নেটওয়ার্ক ব্যর্থ হলেও লোকালে লেখা থেকে যাবে
+    busy = true; $('status').textContent = 'সেভ হচ্ছে…';
+    try {
+      const im = images[cur], text = ta.value;
+      const body = {message: 'Proofread ' + im.stem + '.txt', content: toB64(text)};
+      if (sha) body.sha = sha;
+      if (cfg.branch) body.branch = cfg.branch;
+      // texts/ ফোল্ডার না থাকলে GitHub এই পাথে ফাইল তৈরির সময় ফোল্ডারও তৈরি করে দেয়
+      const r = await api('/contents/' + epath(cfg.textsDir + '/' + im.stem + '.txt'),
+                          {method: 'PUT', body: JSON.stringify(body), headers: {'Content-Type': 'application/json'}});
+      if (!r.ok) {
+        toast(await errMsg(r) + (r.status === 409 || r.status === 422 ? ' — ⟳ চেপে রিলোড করে আবার চেষ্টা করুন (আপনার লেখা খসড়ায় নিরাপদ আছে)' : ''), true, 7000);
+        return false;
+      }
+      const j = await r.json();
+      sha = j.content.sha; orig = text; textSet.add(im.stem);
+      stashDraft();                     // সেভের মধ্যে আবার কিছু লিখলে সেটা খসড়া থাকবে, নইলে খসড়া মুছে যাবে
+      updateOption(cur); toast('সেভ হয়েছে (GitHub-এ পুশ)');
+      return true;
+    } catch (e) { toast('সেভ ব্যর্থ: ' + e.message + ' (লেখা খসড়ায় নিরাপদ আছে)', true); return false; }
+    finally { busy = false; updateStatus(); }
+  }
+
+  async function setProofed(stem, val) {
+    const had = proofed.has(stem);
+    if (val) proofed.add(stem); else proofed.delete(stem);
+    const data = JSON.stringify({proofed: [...proofed].sort(natCmp)}, null, 2) + '\n';
+    const body = {message: 'Proofing status: ' + stem, content: toB64(data)};
+    if (proofSha) body.sha = proofSha;
+    if (cfg.branch) body.branch = cfg.branch;
+    try {
+      const r = await api('/contents/' + epath(cfg.proofFile),
+                          {method: 'PUT', body: JSON.stringify(body), headers: {'Content-Type': 'application/json'}});
+      if (!r.ok) throw new Error(await errMsg(r));
+      proofSha = (await r.json()).content.sha;
+      const i = images.findIndex(im => im.stem === stem); if (i >= 0) updateOption(i);
+      updateStatus();
+      return true;
+    } catch (e) {
+      if (had) proofed.add(stem); else proofed.delete(stem);   // ব্যর্থ হলে আগের অবস্থায় ফেরত
+      toast('প্রুফড তালিকা সেভ ব্যর্থ: ' + e.message, true);
+      const i = images.findIndex(im => im.stem === stem); if (i >= 0) updateOption(i);
+      updateStatus();
+      return false;
+    }
+  }
+
+  // ---------- ইনিশিয়ালাইজ ----------
+  async function init() {
+    if (initing) return;
+    initing = true; initFailed = false;
+    flush();
+    $('status').textContent = 'লোড হচ্ছে…';
+    try {
+      if (!cfg.token) toast('টোকেন নেই — শুধু দেখা যাবে, সেভ/পুশ হবে না (⚙ থেকে টোকেন দিন)', true, 4500);
+
+      // ডিফল্ট ব্রাঞ্চ ও লেখার অনুমতি জানা
+      const ri = await api('');
+      if (!ri.ok) throw new Error(await errMsg(ri));
+      const info = await ri.json();
+      if (cfg.token && info.permissions && info.permissions.push === false)
+        toast('এই টোকেনে রিপোতে লেখার অনুমতি নেই (Contents: Read and write দিন)', true, 6000);
+      const br = cfg.branch || info.default_branch;
+
+      // এক রিকোয়েস্টে পুরো ফাইল তালিকা (১০০০-এর বেশি পেইজেও কাজ করে)
+      const rt = await api('/git/trees/' + encodeURIComponent(br) + '?recursive=1');
+      if (!rt.ok) throw new Error(await errMsg(rt));
+      const tj = await rt.json();
+      if (tj.truncated) toast('সতর্কতা: রিপো খুব বড়, ফাইল তালিকা অসম্পূর্ণ হতে পারে', true);
+      const blobs = (tj.tree || []).filter(e => e.type === 'blob');
+
+      const pp = cfg.pagesDir + '/', tp = cfg.textsDir + '/';
+      const direct = (e, pre) => e.path.startsWith(pre) && e.path.indexOf('/', pre.length) < 0;
+
+      const imgs = blobs.filter(e => direct(e, pp) && /\.(jpe?g|png|webp)$/i.test(e.path))
+                        .map(e => { const name = e.path.slice(pp.length); return {name, stem: name.replace(/\.[^.]+$/, '')}; })
+                        .sort((a, b) => natCmp(a.name, b.name));
+      if (!imgs.length) throw new Error(cfg.pagesDir + '/ ফোল্ডারে কোনো ছবি নেই');
+
+      const ts = new Set();
+      blobs.forEach(e => { if (direct(e, tp) && /\.txt$/i.test(e.path)) ts.add(e.path.slice(tp.length).replace(/\.txt$/i, '')); });
+      if (!blobs.some(e => e.path.startsWith(tp)))
+        toast(cfg.textsDir + '/ ফোল্ডার এখনো নেই — প্রথম সেভ করলেই নিজে থেকে তৈরি হবে', false, 4500);
+
+      let ps = new Set(), psha = null;
+      if (blobs.some(e => e.path === cfg.proofFile)) {
+        const r3 = await api('/contents/' + epath(cfg.proofFile) + refQ());
+        if (r3.ok) {
+          const j = await r3.json(); psha = j.sha;
+          try { (JSON.parse(fromB64(j.content)).proofed || []).forEach(s => ps.add(s)); } catch(e) {}
+        }
+      }
+
+      images = imgs; textSet = ts; proofed = ps; proofSha = psha;
+      cur = -1; renderSelect();
+      let start = images.findIndex(im => im.stem === cfg.last);   // যেখানে ছিলেন সেখান থেকে শুরু
+      if (start < 0) start = 0;
+      restoreOnce = true;
+      await go(start);
+    } catch (e) {
+      initFailed = true;
+      $('status').textContent = '';
+      toast('সংযোগ ব্যর্থ: ' + e.message, true);
+      openSettings();
+    } finally { initing = false; }
+  }
+
+  // ---------- সেটিংস ----------
+  function openSettings() {
+    $('cRepo').value = cfg.repo; $('cBranch').value = cfg.branch; $('cToken').value = cfg.token;
+    $('cPages').value = cfg.pagesDir; $('cTexts').value = cfg.textsDir; $('cProof').value = cfg.proofFile;
+    const d = $('dlg'); if (!d.open) d.showModal();
+  }
+  $('btnSettings').onclick = openSettings;
+  $('cCancel').onclick = () => $('dlg').close();
+  $('cClearTok').onclick = () => { $('cToken').value = ''; cfg.token = ''; saveCfg(); toast('টোকেন মুছে ফেলা হয়েছে'); };
+  $('cSave').onclick = () => {
+    const oldRepo = cfg.repo, oldBr = cfg.branch;
+    const repo = $('cRepo').value.trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').replace(/^\/+|\/+$/g, '');
+    if (!/^[^\/\s]+\/[^\/\s]+$/.test(repo)) { toast('রিপো owner/repo আকারে দিন', true); return; }
+    cfg.repo = repo;
+    cfg.branch = $('cBranch').value.trim();
+    cfg.token = $('cToken').value.trim();
+    cfg.pagesDir = $('cPages').value.trim().replace(/^\/+|\/+$/g, '') || 'pages';
+    cfg.textsDir = $('cTexts').value.trim().replace(/^\/+|\/+$/g, '') || 'texts';
+    cfg.proofFile = $('cProof').value.trim().replace(/^\/+/, '') || 'proofed.json';
+    if (cfg.repo !== oldRepo || cfg.branch !== oldBr) { cfg.last = ''; cfg.view = null; }
+    saveCfg();
+    imgCache.clear();
+    forceInit = true;
+    $('dlg').close();
+  };
+  // ডায়ালগ বন্ধ হলে: সেভ করলে বা প্রথমবার (তালিকা নেই) হলে সংযোগ শুরু
+  $('dlg').addEventListener('close', () => {
+    if (forceInit || (!images.length && !initFailed && !initing)) { forceInit = false; init(); }
+  });
+
+  // ---------- ইভেন্ট ----------
+  $('btnReload').onclick = () => { imgCache.clear(); init(); };
+  $('btnPrev').onclick = () => go(cur - 1);
+  $('btnNext').onclick = () => go(cur + 1);
+  sel.onchange = () => go(parseInt(sel.value, 10));
+  function jumpTo() {
+    const n = parseInt($('jump').value, 10);
+    if (!n) return;
+    let i = images.findIndex(im => numOf(im.stem) === n);
+    if (i < 0 && n >= 1 && n <= images.length) i = n - 1;
+    if (i < 0) { toast('এই নম্বরের পেইজ নেই', true); return; }
+    go(i);
+  }
+  $('btnGo').onclick = jumpTo;
+  $('jump').addEventListener('keydown', e => { if (e.key === 'Enter') jumpTo(); });
+  $('btnNextUn').onclick = () => {
+    for (let k = 1; k <= images.length; k++) {
+      const i = (cur + k) % images.length;
+      if (!proofed.has(images[i].stem)) { go(i); return; }
+    }
+    toast('সব পেইজ প্রুফড!');
+  };
+  $('btnSwap').onclick = () => { cfg.swap = !cfg.swap; saveCfg(); applySwap(); };
+  $('zIn').onclick  = () => { cfg.zoom = Math.min(400, cfg.zoom + 25); saveCfg(); applyZoom(); };
+  $('zOut').onclick = () => { cfg.zoom = Math.max(50, cfg.zoom - 25); saveCfg(); applyZoom(); };
+  $('zFit').onclick = () => { cfg.zoom = 100; saveCfg(); applyZoom(); };
+  $('fIn').onclick  = () => { cfg.fs = Math.min(40, cfg.fs + 2); saveCfg(); applyFont(); };
+  $('fOut').onclick = () => { cfg.fs = Math.max(12, cfg.fs - 2); saveCfg(); applyFont(); };
+
+  // টাইপ করলেই (০.৩ সেকেন্ড থেমে) লোকাল স্টোরেজে খসড়া সংরক্ষণ
+  ta.addEventListener('input', () => {
+    updateStatus();
+    clearTimeout(draftT); draftT = setTimeout(stashDraft, 300);
+    lazyView();
+  });
+  ta.addEventListener('scroll', lazyView, {passive: true});
+  ta.addEventListener('keyup', lazyView);
+  ta.addEventListener('click', lazyView);
+  imgBox.addEventListener('scroll', lazyView, {passive: true});
+
+  $('btnSave').onclick = () => saveText();
+  $('btnProof').onclick = async () => {
+    if (cur < 0 || ta.disabled) return;
+    if (!sha && !ta.value.trim() && !confirm('এই পেইজে কোনো টেক্সট নেই। তবুও প্রুফড চিহ্নিত করবেন?')) return;
+    const ok = await saveText();
+    if (!ok) return;
+    const stem = images[cur].stem;
+    if (!proofed.has(stem)) { if (!(await setProofed(stem, true))) return; }
+    if (cur + 1 < images.length) go(cur + 1); else toast('শেষ পেইজ — সেভ ও প্রুফড হয়েছে');
+  };
+  $('btnToggleProof').onclick = async () => {
+    if (cur < 0) return;
+    const stem = images[cur].stem;
+    await setProofed(stem, !proofed.has(stem));
+  };
+  $('btnDiscard').onclick = () => {
+    if (cur < 0 || ta.disabled) return;
+    if (!dirty()) { toast('বাতিল করার মতো অসংরক্ষিত পরিবর্তন নেই'); return; }
+    if (!confirm('এই পেইজের অসংরক্ষিত পরিবর্তন/খসড়া বাতিল করে রিপোর টেক্সট ফিরিয়ে আনবেন?')) return;
+    ta.value = orig; stashDraft(); updateStatus(); toast('খসড়া বাতিল হয়েছে');
+  };
+
+  document.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveText(); }
+    else if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); go(cur + 1); }
+    else if (e.altKey && e.key === 'ArrowLeft')  { e.preventDefault(); go(cur - 1); }
+  });
+
+  // ব্রাউজার বন্ধ/ব্যাকগ্রাউন্ডে গেলে/ক্র্যাশের আগমুহূর্তে সবকিছু লোকালে রেখে দেওয়া
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
+  window.addEventListener('pagehide', flush);
+  window.addEventListener('beforeunload', flush);
+
+  applyZoom(); applyFont(); applySwap();
+  if (!cfg.token) openSettings();   // প্রথমবার টোকেন চাইবে; বাতিল করলে শুধু-পড়া মোডে চলবে
+  else init();
+})();
+</script>
+</body>
+</html>
