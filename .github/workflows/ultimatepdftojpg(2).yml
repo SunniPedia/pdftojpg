@@ -1,4 +1,4 @@
-name: RizwanPDF to Image and Push
+name: RizwanPDF to Image
 
 # PDF → JPG (300 DPI, quality 95) → সরাসরি রিপোর pages/ ফোল্ডারে push
 # (আগের ZIP + Artifact পদ্ধতি বাদ দেওয়া হয়েছে)
